@@ -5,6 +5,7 @@
 #include "cdromtoc.h"
 #include "chdfile.h"
 #include "flacfile.h"
+#include "libretro_log.h"
 #include "misc.h"
 #include "oggfile.h"
 #include "path.h"
@@ -63,7 +64,7 @@ bool CdromToc::loadCueSheet(const std::string &filename)
     File in;
     if (!in.open(filename))
     {
-        LOG(LOG_ERROR, "Could not open CUE file: %s\n", filename.c_str());
+        Libretro::Log::message(RETRO_LOG_ERROR, "Could not open CUE file: %s\n", filename.c_str());
         return false;
     }
 
@@ -94,7 +95,12 @@ bool CdromToc::loadCueSheet(const std::string &filename)
 
         if (std::regex_match(line, match, FILE_REGEX))
         {
-            currentFile = path_replace_filename(filename.c_str(), match[1].str().c_str());
+            const std::string filespec = match[1].str();
+            if (path_is_absolute(filespec))
+                currentFile = filespec;
+            else
+                currentFile = path_replace_filename(filename.c_str(), filespec.c_str());
+            
             currentTrack = -1;
             currentIndex = -1;
             currentType = TrackType::Silence;
@@ -108,7 +114,7 @@ bool CdromToc::loadCueSheet(const std::string &filename)
 
             if (!isBinary && !isWave)
             {
-                LOG(LOG_ERROR, "File type %s is not supported.\n", type.c_str());
+                Libretro::Log::message(RETRO_LOG_ERROR, "File type %s is not supported.\n", type.c_str());
                 return false;
             }
 
@@ -118,7 +124,7 @@ bool CdromToc::loadCueSheet(const std::string &filename)
                 File file;
                 if (!file.open(currentFile))
                 {
-                    LOG(LOG_ERROR, "File %s could not be opened.\n", match[1].str().c_str());
+                    Libretro::Log::message(RETRO_LOG_ERROR, "File %s could not be opened.\n", match[1].str().c_str());
                     return false;
                 }
 
@@ -149,7 +155,7 @@ bool CdromToc::loadCueSheet(const std::string &filename)
         {
             if (currentFileIndex < 0)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Track directive without file!\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Track directive without file!\n");
                 return false;
             }
 
@@ -157,19 +163,19 @@ bool CdromToc::loadCueSheet(const std::string &filename)
 
             if ((newTrack < 1) || (newTrack > 99))
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Track numbers should be between 1 and 99.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Track numbers should be between 1 and 99.\n");
                 return false;
             }
 
             if ((currentTrack != -1) && (newTrack - currentTrack != 1))
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Track numbers should be contiguous and increasing.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Track numbers should be contiguous and increasing.\n");
                 return false;
             }
 
             if ((currentTrack != -1) && (!trackHasIndexOne))
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Track %02d has no index 01.\n", currentTrack);
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Track %02d has no index 01.\n", currentTrack);
                 return false;
             }
 
@@ -189,13 +195,13 @@ bool CdromToc::loadCueSheet(const std::string &filename)
                 currentType = currentFileAudioType;
             else
             {
-                LOG(LOG_ERROR, "Track mode %s is not supported.\n", match[2].str().c_str());
+                Libretro::Log::message(RETRO_LOG_ERROR, "Track mode %s is not supported.\n", match[2].str().c_str());
                 return false;
             }
 
             if (((currentType == TrackType::Mode1_2048) || (currentType == TrackType::Mode1_2352)) && (currentFileAudioType != TrackType::AudioPCM))
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Data track defined when current source file is audio type.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Data track defined when current source file is audio type.\n");
                 return false;
             }
 
@@ -206,19 +212,19 @@ bool CdromToc::loadCueSheet(const std::string &filename)
         {
             if (currentTrack < 0)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Pregap directive with no track defined.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Pregap directive with no track defined.\n");
                 return false;
             }
 
             if (trackHasPregap)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: A track can have only one pregap.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: A track can have only one pregap.\n");
                 return false;
             }
 
             if (currentIndex >= 0)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Pregap directive must come before any indexes.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Pregap directive must come before any indexes.\n");
                 return false;
             }
 
@@ -238,13 +244,13 @@ bool CdromToc::loadCueSheet(const std::string &filename)
         {
             if (currentTrack < 0)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Index directive with no track defined.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Index directive with no track defined.\n");
                 return false;
             }
 
             if (trackHasPostgap)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Index directive must come before postgap.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Index directive must come before postgap.\n");
                 return false;
             }
 
@@ -252,19 +258,19 @@ bool CdromToc::loadCueSheet(const std::string &filename)
 
             if ((newIndex < 0) || (newIndex > 99))
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Index numbers should be between 0 and 99.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Index numbers should be between 0 and 99.\n");
                 return false;
             }
 
             if (trackHasPregap && (newIndex == 0))
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Index 0 is not allowed with pregap.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Index 0 is not allowed with pregap.\n");
                 return false;
             }
 
             if ((currentIndex != -1) && (newIndex - currentIndex != 1))
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Index numbers should be contiguous and increasing.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Index numbers should be contiguous and increasing.\n");
                 return false;
             }
 
@@ -287,19 +293,19 @@ bool CdromToc::loadCueSheet(const std::string &filename)
         {
             if (currentTrack < 0)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Postgap directive with no track defined.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Postgap directive with no track defined.\n");
                 return false;
             }
 
             if (currentIndex < 0)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: Postgap directive must come after all indexes.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Postgap directive must come after all indexes.\n");
                 return false;
             }
 
             if (trackHasPostgap)
             {
-                LOG(LOG_ERROR, "Invalid CUE sheet: A track can have only one postgap.\n");
+                Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: A track can have only one postgap.\n");
                 return false;
             }
 
@@ -321,13 +327,13 @@ bool CdromToc::loadCueSheet(const std::string &filename)
 
     if (currentTrack == -1)
     {
-        LOG(LOG_ERROR, "Invalid CUE sheet: Should define at least one track.\n");
+        Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Should define at least one track.\n");
         return false;
     }
 
     if ((currentTrack != -1) && (!trackHasIndexOne))
     {
-        LOG(LOG_ERROR, "Invalid CUE sheet: Track %02d  has no index 01.\n", currentTrack);
+        Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CUE sheet: Track %02d  has no index 01.\n", currentTrack);
         return false;
     }
 
@@ -441,14 +447,14 @@ bool  CdromToc::loadChd(const std::string& filename)
     ChdFile chd;
     if (!chd.open(filename))
     {
-        LOG(LOG_ERROR, "Could not open CHD file: %s\n", filename.c_str());
+        Libretro::Log::message(RETRO_LOG_ERROR, "Could not open CHD file: %s\n", filename.c_str());
         return false;
     }
 
     // Add the CHD to the file list
     m_fileList.push_back({ filename, static_cast<int64_t>(chd.size()) });
 
-    // Position inside the CHD (sectors). 
+    // Position inside the CHD (sectors).
     // Each track begins on a sector number that is a multiple of 4
     uint32_t chdPosition = 0;
 
@@ -503,7 +509,7 @@ bool  CdromToc::loadChd(const std::string& filename)
 
         if (!regexMatched)
         {
-            LOG(LOG_ERROR, "Regex did not match line: %s\n", metadata.c_str());
+            Libretro::Log::message(RETRO_LOG_ERROR, "Regex did not match line: %s\n", metadata.c_str());
             return false;
         }
 
@@ -525,7 +531,7 @@ bool  CdromToc::loadChd(const std::string& filename)
         trackLength = std::stoul(match[4].str());
 
         // Find the track type
-        std::string trackTypeStr = match[2];
+        const std::string trackTypeStr = match[2];
 
         if (string_compare_insensitive(trackTypeStr.c_str(), "MODE1"))
             trackType = TrackType::Mode1_2048;
@@ -539,9 +545,12 @@ bool  CdromToc::loadChd(const std::string& filename)
             trackType = TrackType::AudioPCM;
         else
         {
-            LOG(LOG_ERROR, "Track type %s is not supported.\n", trackTypeStr.c_str());
+            Libretro::Log::message(RETRO_LOG_ERROR, "Track type %s is not supported.\n", trackTypeStr.c_str());
             return false;
         }
+
+        const std::string pgTypeStr = match[6];
+        const bool isVAudio = string_compare_insensitive(pgTypeStr.c_str(), "VAUDIO");
 
         // Make the CHD position a multiple of 4
         if (chdPosition % 4)
@@ -551,12 +560,13 @@ bool  CdromToc::loadChd(const std::string& filename)
         if (pregapLength)
         {
             m_toc.push_back({ -1, { static_cast<uint8_t>(trackNumber), 0 }, TrackType::Silence, 0, cdPosition, 0, pregapLength });
-            
+
             // CHD WEIRDNESS: If the previous track was data don't move the chd position
-            if (!previousWasData)
+            // But do it if PGTYPE indicates 'VAUDIO' (newer CHDs)
+            if (!previousWasData || isVAudio)
             {
                 chdPosition += pregapLength;
-                
+
                 // Shorten the track accordingly
                 trackLength -= pregapLength;
             }
@@ -581,7 +591,7 @@ bool  CdromToc::loadChd(const std::string& filename)
 
     if (m_toc.empty())
     {
-        LOG(LOG_ERROR, "Invalid CHD: TOC is empty!\n");
+        Libretro::Log::message(RETRO_LOG_ERROR, "Invalid CHD: TOC is empty!\n");
         return false;
     }
 
@@ -629,7 +639,7 @@ bool CdromToc::findAudioFileSize(const std::string& path, File &file, int64_t &f
 
         if (!wavFile.initialize(&file))
         {
-            LOG(LOG_ERROR, "File %s%s is not a valid WAV file.", filename.c_str(), extension.c_str());
+            Libretro::Log::message(RETRO_LOG_ERROR, "File %s%s is not a valid WAV file.", filename.c_str(), extension.c_str());
             return false;
         }
 
@@ -646,7 +656,7 @@ bool CdromToc::findAudioFileSize(const std::string& path, File &file, int64_t &f
 
         if (!flacFile.initialize(&file))
         {
-            LOG(LOG_ERROR, "File %s%s is not a valid FLAC file.", filename.c_str(), extension.c_str());
+            Libretro::Log::message(RETRO_LOG_ERROR, "File %s%s is not a valid FLAC file.", filename.c_str(), extension.c_str());
             return false;
         }
 
@@ -663,7 +673,7 @@ bool CdromToc::findAudioFileSize(const std::string& path, File &file, int64_t &f
 
         if (!oggFile.initialize(&file))
         {
-            LOG(LOG_ERROR, "File %s%s is not a valid OGG file.", filename.c_str(), extension.c_str());
+            Libretro::Log::message(RETRO_LOG_ERROR, "File %s%s is not a valid OGG file.", filename.c_str(), extension.c_str());
             return false;
         }
 
@@ -674,7 +684,7 @@ bool CdromToc::findAudioFileSize(const std::string& path, File &file, int64_t &f
 
         return true;
     }
-    
-    LOG(LOG_ERROR, "File type %s is not supported.", extension.c_str());
+
+    Libretro::Log::message(RETRO_LOG_ERROR, "File type %s is not supported.", extension.c_str());
     return false;
 }

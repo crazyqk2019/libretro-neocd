@@ -1,5 +1,7 @@
 STATIC_LINKING := 0
 AR             := ar
+HAVE_CDROM     := 0
+USE_LTO        := 0
 
 ifneq ($(V),1)
    Q := @
@@ -21,6 +23,8 @@ else ifneq ($(findstring Darwin,$(shell uname -a)),)
    platform = osx
 else ifneq ($(findstring win,$(shell uname -a)),)
    platform = win
+else ifneq ($(findstring MSYS,$(MSYSTEM)),)
+   platform = win
 endif
 endif
 
@@ -32,6 +36,9 @@ ifeq ($(shell uname -a),)
 else ifneq ($(findstring Darwin,$(shell uname -a)),)
 	system_platform = osx
 	arch = intel
+ifeq ($(shell uname -p),arm)
+	arch = arm
+endif
 ifeq ($(shell uname -p),powerpc)
 	arch = ppc
 endif
@@ -43,21 +50,6 @@ CORE_DIR    += .
 TARGET_NAME := neocd
 LIBM		    = -lm
 
-ifeq ($(ARCHFLAGS),)
-ifeq ($(archs),ppc)
-   ARCHFLAGS = -arch ppc -arch ppc64
-else
-   ARCHFLAGS = -arch i386 -arch x86_64
-endif
-endif
-
-ifeq ($(platform), osx)
-ifndef ($(NOUNIVERSAL))
-   CXXFLAGS += $(ARCHFLAGS)
-   LFLAGS += $(ARCHFLAGS)
-endif
-endif
-
 ifeq ($(STATIC_LINKING), 1)
 EXT := a
 endif
@@ -68,33 +60,86 @@ ifneq (,$(findstring unix,$(platform)))
    fpic := -fPIC
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
    LIBS += -lpthread
+   HAVE_CDROM := 1
+   USE_LTO := 1
 else ifeq ($(platform), linux-portable)
    TARGET := $(TARGET_NAME)_libretro.$(EXT)
    fpic := -fPIC -nostdlib
    SHARED := -shared -Wl,--version-script=$(CORE_DIR)/link.T
 	LIBM :=
+   HAVE_CDROM := 1
+   USE_LTO := 1
 else ifneq (,$(findstring osx,$(platform)))
    TARGET := $(TARGET_NAME)_libretro.dylib
    fpic := -fPIC
    SHARED := -dynamiclib
+
+ifeq ($(UNIVERSAL),1)
+ifeq ($(ARCHFLAGS),)
+ARCHFLAGS = -arch i386 -arch x86_64
+ifeq ($(shell uname -p),powerpc)
+   ARCHFLAGS = -arch ppc -arch ppc64
+endif
+ifeq ($(shell uname -p),arm)
+   ARCHFLAGS = -arch arm64
+endif
+endif
+   CFLAGS += $(ARCHFLAGS)
+   CXXFLAGS += $(ARCHFLAGS)
+   LFLAGS += $(ARCHFLAGS)
+endif
+
+   ifeq ($(CROSS_COMPILE),1)
+		TARGET_RULE   = -target $(LIBRETRO_APPLE_PLATFORM) -isysroot $(LIBRETRO_APPLE_ISYSROOT)
+		CFLAGS   += $(TARGET_RULE)
+		CPPFLAGS += $(TARGET_RULE)
+		CXXFLAGS += $(TARGET_RULE)
+		LDFLAGS  += $(TARGET_RULE)
+   endif
+
 else ifneq (,$(findstring ios,$(platform)))
    TARGET := $(TARGET_NAME)_libretro_ios.dylib
 	fpic := -fPIC
 	SHARED := -dynamiclib
+	DEFINES := -DIOS
+  MINVERSION=
 
 ifeq ($(IOSSDK),)
    IOSSDK := $(shell xcodebuild -version -sdk iphoneos Path)
 endif
-
-	DEFINES := -DIOS
-	CC = cc -arch armv7 -isysroot $(IOSSDK)
-ifeq ($(platform),ios9)
-CC     += -miphoneos-version-min=8.0
-CXXFLAGS += -miphoneos-version-min=8.0
+ifeq ($(platform),ios-arm64)
+  CC = clang -arch arm64 -isysroot $(IOSSDK) -stdlib=libc++
+  CXX = clang++ -arch arm64 -isysroot $(IOSSDK) -stdlib=libc++
 else
-CC     += -miphoneos-version-min=5.0
-CXXFLAGS += -miphoneos-version-min=5.0
+  CC = clang -arch armv7 -isysroot $(IOSSDK)
+  CXX = clang++ -arch armv7 -isysroot $(IOSSDK)
 endif
+
+ifeq ($(platform),$(filter $(platform),ios9 ios-arm64))
+  MINVERSION = -miphoneos-version-min=9.0
+else
+  MINVERSION = -miphoneos-version-min=5.0
+endif
+  CFLAGS       += $(MINVERSION)
+  CXXFLAGS     += $(MINVERSION)
+  LDFLAGS      += $(MINVERSION)
+
+else ifeq ($(platform), tvos-arm64)
+   TARGET := $(TARGET_NAME)_libretro_tvos.dylib
+   fpic := -fPIC
+   SHARED := -dynamiclib
+   DEFINES := -DIOS -stdlib=libc++
+
+ifeq ($(IOSSDK),)
+   IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
+endif
+   CC  = cc -arch arm64  -isysroot $(IOSSDK)
+   CXX = c++ -arch arm64 -isysroot $(IOSSDK)
+   MINVERSION    = -mappletvos-version-min=11.0
+   CFLAGS       += $(MINVERSION)
+   CXXFLAGS     += $(MINVERSION)
+   LDFLAGS      += $(MINVERSION)
+
 else ifneq (,$(findstring qnx,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro_qnx.so
    fpic := -fPIC
@@ -102,10 +147,20 @@ else ifneq (,$(findstring qnx,$(platform)))
 else ifeq ($(platform), emscripten)
    TARGET := $(TARGET_NAME)_libretro_emscripten.bc
    fpic := -fPIC
-   SHARED := 
+   AR=emar
+   SHARED :=
    CFLAGS += -DSYNC_CDROM=1
    CXXFLAGS += -DSYNC_CDROM=1
    STATIC_LINKING = 1
+# DOS
+else ifeq ($(platform), dos)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = i586-pc-msdosdjgpp-gcc
+	AR = i586-pc-msdosdjgpp-ar
+	CXX = i586-pc-msdosdjgpp-g++
+	CFLAGS += -march=i386 -DSYNC_CDROM=1
+	CXXFLAGS += -march=i386 -DSYNC_CDROM=1
+	STATIC_LINKING=1
 else ifeq ($(platform), libnx)
    include $(DEVKITPRO)/libnx/switch_rules
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
@@ -114,6 +169,15 @@ else ifeq ($(platform), libnx)
    CFLAGS += -march=armv8-a -mtune=cortex-a57 -mtp=soft -mcpu=cortex-a57+crc+fp+simd -ffast-math
    CXXFLAGS := $(ASFLAGS) $(CFLAGS)
    STATIC_LINKING = 1
+# PS2
+else ifeq ($(platform), ps2)
+	TARGET := $(TARGET_NAME)_libretro_$(platform).a
+	CC = mips64r5900el-ps2-elf-gcc
+	CXX = mips64r5900el-ps2-elf-g++
+	AR = mips64r5900el-ps2-elf-ar
+	CFLAGS += -G0 -DPS2 -DABGR1555 -DSYNC_CDROM=1
+	CXXFLAGS += -G0 -DPS2 -DABGR1555 -DSYNC_CDROM=1
+	STATIC_LINKING=1
 else ifeq ($(platform), vita)
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
    CC = arm-vita-eabi-gcc
@@ -147,13 +211,19 @@ else ifeq ($(platform), psl1ght)
    CXX = $(PS3DEV)/ppu/bin/ppu-g++$(EXE_EXT)
    CC_AS = $(PS3DEV)/ppu/bin/ppu-gcc$(EXE_EXT)
    AR = $(PS3DEV)/ppu/bin/ppu-ar$(EXE_EXT)
-   CFLAGS += -D__CELLOS_LV2__ -D__PSL1GHT__ -mcpu=cell -D_XOPEN_SOURCE=500  -DSYNC_CDROM=1
-   CXXFLAGS += -D__CELLOS_LV2__ -D__PSL1GHT__ -mcpu=cell -DDISABLE_AUDIO_THREAD=1 -D_XOPEN_SOURCE=500  -DSYNC_CDROM=1
+   CFLAGS += -D__PSL1GHT__ -mcpu=cell -D_XOPEN_SOURCE=500  -DSYNC_CDROM=1
+   CXXFLAGS += -D__PSL1GHT__ -mcpu=cell -DDISABLE_AUDIO_THREAD=1 -D_XOPEN_SOURCE=500  -DSYNC_CDROM=1
    STATIC_LINKING = 1
 else
-   CC = gcc
+   CC ?= gcc
+   HAVE_CDROM := 1
+   USE_LTO := 1
    TARGET := $(TARGET_NAME)_libretro.dll
-   SHARED := -shared -static-libgcc -static-libstdc++ -s -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
+   SHARED := -shared -static-libgcc -static-libstdc++
+   ifneq ($(DEBUG), 1)
+   SHARED += -s
+   endif  
+   SHARED += -Wl,--version-script=$(CORE_DIR)/link.T -Wl,--no-undefined
 endif
 
 LDFLAGS += $(LIBM)
@@ -162,30 +232,42 @@ ifeq ($(DEBUG), 1)
    CFLAGS += -O0 -g -DDEBUG
    CXXFLAGS += -O0 -g -DDEBUG
 else ifeq ($(platform), emscripten)
-   CFLAGS += -O2 -fomit-frame-pointer
-   CXXFLAGS += -O2 -fomit-frame-pointer
+   CFLAGS += -O2
+   CXXFLAGS += -O2
 else
-   CFLAGS += -Ofast -fomit-frame-pointer
-   CXXFLAGS += -Ofast -fomit-frame-pointer
+   CFLAGS += -Ofast -DNDEBUG
+   CXXFLAGS += -Ofast -DNDEBUG
 endif
 
-CFLAGS += -DHAVE_COMPRESSION -DHAVE_ZLIB -DHAVE_7ZIP -D_7ZIP_ST -DHAVE_FLAC
-CXXFLAGS += -std=c++11 -fno-exceptions -fno-rtti
+ifeq ($(HAVE_CDROM), 1)
+   CFLAGS += -DHAVE_CDROM
+   CXXFLAGS += -DHAVE_CDROM
+endif
+
+ifeq ($(USE_LTO), 1)
+   CFLAGS += -flto -fuse-linker-plugin
+   CXXFLAGS += -flto -fuse-linker-plugin
+endif
+
+GIT_VERSION := " $(shell git rev-parse --short HEAD || echo unknown)"
+ifneq ($(GIT_VERSION)," unknown")
+	CXXFLAGS += -DGIT_VERSION=\"$(GIT_VERSION)\"
+endif
+
+CFLAGS += -fno-ident -DHAVE_ZLIB -DZ7_ST -DHAVE_FLAC -DZSTD_DISABLE_ASM -DUSE_LIBRETRO_VFS
+CXXFLAGS += -std=c++14 -fno-exceptions -fno-rtti -fno-ident -DHAVE_ZLIB -DZ7_ST -DHAVE_FLAC -DZSTD_DISABLE_ASM -DUSE_LIBRETRO_VFS
 
 include Makefile.common
 
 OBJECTS := $(SOURCES_C:.c=.o) $(SOURCES_CXX:.cpp=.o)
 
-CFLAGS   += -Wall -D__LIBRETRO__ $(fpic) $(INCFLAGS) 
+CFLAGS   += -Wall -D__LIBRETRO__ $(fpic) $(INCFLAGS)
 CXXFLAGS += -Wall -D__LIBRETRO__ $(fpic) $(INCFLAGS)
 
 all: $(TARGET)
 
 $(TARGET): $(OBJECTS)
-ifeq ($(platform), emscripten)
-	@$(if $(Q), $(shell echo echo LD $@),)
-	$(CXX) $(fpic) -r $(SHARED) -o $@ $(OBJECTS) $(LIBS) $(LDFLAGS)
-else ifeq ($(STATIC_LINKING), 1)
+ifeq ($(STATIC_LINKING), 1)
 	$(AR) rcs $@ $(OBJECTS)
 else
 	@$(if $(Q), $(shell echo echo LD $@),)
@@ -194,17 +276,12 @@ endif
 
 
 %.o: %.c
-	@$(if $(Q), $(shell echo echo CC $<),)
-	$(Q)$(CC) $(CFLAGS) $(fpic) -c -o $@ $<
+	$(CC) $(CFLAGS) $(fpic) -c -o $@ $<
 
 %.o: %.cpp
-	@$(if $(Q), $(shell echo echo CXX $<),)
-	$(Q)$(CXX) $(CXXFLAGS) $(fpic) -c -o $@ $<
+	$(CXX) $(CXXFLAGS) $(fpic) -c -o $@ $<
 
 clean:
 	rm -f $(OBJECTS) $(TARGET)
 
 .PHONY: clean
-
-print-%:
-	@echo '$*=$($*)'

@@ -21,6 +21,7 @@ public:
     {
         None,
         SMKDan,
+        SMKDanBeta,
         Universe32,
         Universe33
     };
@@ -45,6 +46,7 @@ public:
 
     explicit Bios() = delete;
 
+    static void autoByteSwap(uint8_t *biosData, size_t sz);
     static void autoByteSwap(uint8_t* biosData);
 
     static Type identify(const uint8_t* biosData);

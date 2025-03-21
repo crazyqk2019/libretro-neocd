@@ -2,12 +2,14 @@
 #include <cstring>
 
 #include "bios.h"
-#include "neocd_endian.h"
+#include "libretro_log.h"
+#include "memory.h"
 #include "misc.h"
+#include "neocd_endian.h"
 
 // The patches below are just for convenience / speed as the emulator can run a BIOS unmodified.
 
-// Patter data  used to identify BIOSes
+// Pattern data used to identify BIOSes
 
 static const uint8_t VALIDITY_SEARCH_PATTERN_DATA[] = { 0x00, 0x10, 0xF3, 0x00 };
 
@@ -15,14 +17,17 @@ static const uint8_t FRONT_LOADER_SEARCH_PATTERN_DATA[] = { 0x00, 0xC0, 0xC8, 0x
 static const uint8_t TOP_LOADER_SEARCH_PATTERN_DATA[] = { 0x00, 0xC0, 0xC2, 0x22 };
 static const uint8_t CDZ_SEARCH_PATTERN_DATA[] = { 0x00, 0xC0, 0xA3, 0xE8 };
 
-static const uint8_t SMKDAN_FRONT_SEARCH_PATTERN_DATA[] = { 0x00, 0xC2, 0x33, 0x00 };
-static const uint8_t SMKDAN_TOP_SEARCH_PATTERN_DATA[] = { 0x00, 0xC2, 0x34, 0x00 };
-static const uint8_t SMKDAN_CDZ_SEARCH_PATTERN_DATA[] = { 0x00, 0xC6, 0x20, 0x00 };
+static const uint8_t SMKDANBETA_FRONT_SEARCH_PATTERN_DATA[] = { 0x00, 0xC2, 0x33, 0x00 };
+static const uint8_t SMKDANBETA_TOP_SEARCH_PATTERN_DATA[] = { 0x00, 0xC2, 0x34, 0x00 };
+static const uint8_t SMKDANBETA_CDZ_SEARCH_PATTERN_DATA[] = { 0x00, 0xC6, 0x20, 0x00 };
+
+static const uint8_t SMKDAN_TOP_SEARCH_PATTERN_DATA[] = { 0x00, 0xC2, 0x34, 0x14 };
+static const uint8_t SMKDAN_CDZ_SEARCH_PATTERN_DATA[] = { 0x00, 0xC6, 0x20, 0x14 };
 
 static const uint8_t UNIVERSE32_SEARCH_PATTERN_DATA[] = { 0x1C, 0xCA, 0x85, 0x8A };
 static const uint8_t UNIVERSE33_SEARCH_PATTERN_DATA[] = { 0xA4, 0x4B, 0x15, 0x2F };
 
-// Pattern data used for verfication before patching
+// Pattern data used for verification before patching
 
 static const uint8_t CD_REC_SEARCH_PATTERN_DATA_A[] = { 0x66, 0x10 };
 static const uint8_t CD_REC_SEARCH_PATTERN_DATA_B[] = { 0x66, 0x74 };
@@ -44,7 +49,7 @@ static const uint8_t SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_B[] = { 0x22, 0x39, 0x0
 // Replace data for patches
 
 static const uint8_t REPLACE_DATA_NOP[] = { 0x4E, 0x71 };
-static const uint8_t REPLACE_DATA_SPEEDHACK[] =  { 0xFA, 0xBE, 0x4E, 0x71, 0x4E, 0x71 };
+static const uint8_t REPLACE_DATA_SPEEDHACK[] =  { 0x73, 0x00, 0x4E, 0x71, 0x4E, 0x71 };
 static const uint8_t REPLACE_DATA_UNIBIOS33_CHECKSUM[] =  { 0x60, 0x32 };
 static const uint8_t REPLACE_DATA_SMKDAN_CHECKSUM[] = { 0x22, 0x00, 0x4E, 0x71, 0x4E, 0x71 };
 
@@ -54,7 +59,9 @@ static const Bios::Pattern VALIDITY_SEARCH_PATTERN { 0xC00000, VALIDITY_SEARCH_P
 static const Bios::Pattern FRONT_LOADER_SEARCH_PATTERN { 0xC0006C, FRONT_LOADER_SEARCH_PATTERN_DATA, sizeof(FRONT_LOADER_SEARCH_PATTERN_DATA) };
 static const Bios::Pattern TOP_LOADER_SEARCH_PATTERN { 0xC0006C, TOP_LOADER_SEARCH_PATTERN_DATA, sizeof(TOP_LOADER_SEARCH_PATTERN_DATA) };
 static const Bios::Pattern CDZ_SEARCH_PATTERN { 0xC0006C, CDZ_SEARCH_PATTERN_DATA, sizeof(CDZ_SEARCH_PATTERN_DATA) };
-static const Bios::Pattern SMKDAN_FRONT_SEARCH_PATTERN { 0xC00004, SMKDAN_FRONT_SEARCH_PATTERN_DATA, sizeof(SMKDAN_FRONT_SEARCH_PATTERN_DATA) };
+static const Bios::Pattern SMKDANBETA_FRONT_SEARCH_PATTERN { 0xC00004, SMKDANBETA_FRONT_SEARCH_PATTERN_DATA, sizeof(SMKDANBETA_FRONT_SEARCH_PATTERN_DATA) };
+static const Bios::Pattern SMKDANBETA_TOP_SEARCH_PATTERN { 0xC00004, SMKDANBETA_TOP_SEARCH_PATTERN_DATA, sizeof(SMKDANBETA_TOP_SEARCH_PATTERN_DATA) };
+static const Bios::Pattern SMKDANBETA_CDZ_SEARCH_PATTERN { 0xC00004, SMKDANBETA_CDZ_SEARCH_PATTERN_DATA, sizeof(SMKDANBETA_CDZ_SEARCH_PATTERN_DATA) };
 static const Bios::Pattern SMKDAN_TOP_SEARCH_PATTERN { 0xC00004, SMKDAN_TOP_SEARCH_PATTERN_DATA, sizeof(SMKDAN_TOP_SEARCH_PATTERN_DATA) };
 static const Bios::Pattern SMKDAN_CDZ_SEARCH_PATTERN { 0xC00004, SMKDAN_CDZ_SEARCH_PATTERN_DATA, sizeof(SMKDAN_CDZ_SEARCH_PATTERN_DATA) };
 static const Bios::Pattern UNIVERSE32_SEARCH_PATTERN { 0xC00150, UNIVERSE32_SEARCH_PATTERN_DATA, sizeof(UNIVERSE32_SEARCH_PATTERN_DATA) };
@@ -82,8 +89,13 @@ static const Bios::ReplacePattern CDZ_UNIVERSE33_CHECKSUM_REPLACE[] = {
     { 0x000000, nullptr, nullptr, 0 }
 };
 
-static const Bios::ReplacePattern CDZ_SMKDAN_CHECKSUM_REPLACE[] = {
+static const Bios::ReplacePattern CDZ_SMKDANBETA_CHECKSUM_REPLACE[] = {
     { 0xC62BF4, SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_A, REPLACE_DATA_SMKDAN_CHECKSUM, sizeof(SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_A) },
+    { 0x000000, nullptr, nullptr, 0 }
+};
+
+static const Bios::ReplacePattern CDZ_SMKDAN_CHECKSUM_REPLACE[] = {
+    { 0xC62C08, SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_A, REPLACE_DATA_SMKDAN_CHECKSUM, sizeof(SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_A) },
     { 0x000000, nullptr, nullptr, 0 }
 };
 
@@ -100,7 +112,7 @@ static const Bios::ReplacePattern FRONT_SPEEDHACK_REPLACE[] = {
     { 0x000000, nullptr, nullptr, 0 }
 };
 
-static const Bios::ReplacePattern FRONT_SMKDAN_CHECKSUM_REPLACE[] = {
+static const Bios::ReplacePattern FRONT_SMKDANBETA_CHECKSUM_REPLACE[] = {
     { 0xC23EBE, SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_B, REPLACE_DATA_SMKDAN_CHECKSUM, sizeof(SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_B) },
     { 0x000000, nullptr, nullptr, 0 }
 };
@@ -118,8 +130,13 @@ static const Bios::ReplacePattern TOP_SPEEDHACK_REPLACE[] = {
     { 0x000000, nullptr, nullptr, 0 }
 };
 
-static const Bios::ReplacePattern TOP_SMKDAN_CHECKSUM_REPLACE[] = {
+static const Bios::ReplacePattern TOP_SMKDANBETA_CHECKSUM_REPLACE[] = {
     { 0xC23FBE, SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_B, REPLACE_DATA_SMKDAN_CHECKSUM, sizeof(SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_B) },
+    { 0x000000, nullptr, nullptr, 0 }
+};
+
+static const Bios::ReplacePattern TOP_SMKDAN_CHECKSUM_REPLACE[] = {
+    { 0xC2400A, SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_B, REPLACE_DATA_SMKDAN_CHECKSUM, sizeof(SMKDAN_CHECKSUM_SEARCH_PATTERN_DATA_B) },
     { 0x000000, nullptr, nullptr, 0 }
 };
 
@@ -129,18 +146,23 @@ static const char* const MSG_CD_SPEEDHACK_PATCH_FAILED = "BIOS: Speed hack patch
 static const char* const MSG_CD_SMKDAN_CRC_PATCH_FAILED = "BIOS: SMKDAN checksum patch failed.\n";
 static const char* const MSG_CD_UNIVERSE33_CRC_PATCH_FAILED = "WARNING: BIOS Universe 3.3 checksum patch failed.\n";
 
-void Bios::autoByteSwap(uint8_t *biosData)
+void Bios::autoByteSwap(uint8_t *biosData, size_t sz)
 {
     // Swap the BIOS if needed
     if (*reinterpret_cast<uint16_t*>(&biosData[0]) == LITTLE_ENDIAN_WORD(0x0010))
     {
         uint16_t* start = reinterpret_cast<uint16_t*>(&biosData[0]);
-        uint16_t* end = reinterpret_cast<uint16_t*>(&biosData[/*Memory::ROM_SIZE*/ 0x80000]);
+        uint16_t* end = reinterpret_cast<uint16_t*>(&biosData[sz]);
 
         std::for_each(start, end, [](uint16_t& data) {
             data = BYTE_SWAP_16(data);
         });
     }
+}
+
+void Bios::autoByteSwap(uint8_t *biosData)
+{
+    return autoByteSwap(biosData, Memory::ROM_SIZE);
 }
 
 Bios::Type Bios::identify(const uint8_t *biosData)
@@ -155,8 +177,8 @@ Bios::Type Bios::identify(const uint8_t *biosData)
     {
         family = Bios::FrontLoader;
 
-        if (isPatternPresent(biosData, SMKDAN_FRONT_SEARCH_PATTERN))
-            mod = Bios::SMKDan;
+        if (isPatternPresent(biosData, SMKDANBETA_FRONT_SEARCH_PATTERN))
+            mod = Bios::SMKDanBeta;
     }
     else if (isPatternPresent(biosData, TOP_LOADER_SEARCH_PATTERN))
     {
@@ -164,6 +186,8 @@ Bios::Type Bios::identify(const uint8_t *biosData)
 
         if (isPatternPresent(biosData, SMKDAN_TOP_SEARCH_PATTERN))
             mod = Bios::SMKDan;
+        else if (isPatternPresent(biosData, SMKDANBETA_TOP_SEARCH_PATTERN))
+            mod = Bios::SMKDanBeta;
     }
     else if (isPatternPresent(biosData, CDZ_SEARCH_PATTERN))
     {
@@ -171,6 +195,8 @@ Bios::Type Bios::identify(const uint8_t *biosData)
 
         if (isPatternPresent(biosData, SMKDAN_CDZ_SEARCH_PATTERN))
             mod = Bios::SMKDan;
+        else if (isPatternPresent(biosData, SMKDANBETA_CDZ_SEARCH_PATTERN))
+            mod = Bios::SMKDanBeta;
         else if (isPatternPresent(biosData, UNIVERSE32_SEARCH_PATTERN))
             mod = Bios::Universe32;
         else if (isPatternPresent(biosData, UNIVERSE33_SEARCH_PATTERN))
@@ -185,58 +211,70 @@ void Bios::patch(uint8_t *biosData, const Bios::Type biosType, bool speedHackEna
     if (biosType.first == Bios::CDZ)
     {
         if (!replacePattern(biosData, CDZ_CD_RECOG_REPLACE))
-            LOG(LOG_ERROR, MSG_CD_RECOG_PATCH_FAILED);
+            Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_RECOG_PATCH_FAILED);
 
         if (speedHackEnabled)
         {
             if (!replacePattern(biosData, CDZ_SPEEDHACK_REPLACE))
-                LOG(LOG_ERROR, MSG_CD_SPEEDHACK_PATCH_FAILED);
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SPEEDHACK_PATCH_FAILED);
         }
 
         if (biosType.second == Bios::SMKDan)
         {
             if (!replacePattern(biosData, CDZ_SMKDAN_CHECKSUM_REPLACE))
-                LOG(LOG_ERROR, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
+        }
+
+        if (biosType.second == Bios::SMKDanBeta)
+        {
+            if (!replacePattern(biosData, CDZ_SMKDANBETA_CHECKSUM_REPLACE))
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
         }
 
         if (biosType.second == Bios::Universe33)
         {
             if (!replacePattern(biosData, CDZ_UNIVERSE33_CHECKSUM_REPLACE))
-                LOG(LOG_ERROR, MSG_CD_UNIVERSE33_CRC_PATCH_FAILED);
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_UNIVERSE33_CRC_PATCH_FAILED);
         }
     }
     else if (biosType.first == Bios::FrontLoader)
     {
         if (!replacePattern(biosData, FRONT_CD_RECOG_REPLACE))
-            LOG(LOG_ERROR, MSG_CD_RECOG_PATCH_FAILED);
+            Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_RECOG_PATCH_FAILED);
 
         if (speedHackEnabled)
         {
             if (!replacePattern(biosData, FRONT_SPEEDHACK_REPLACE))
-                LOG(LOG_ERROR, MSG_CD_SPEEDHACK_PATCH_FAILED);
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SPEEDHACK_PATCH_FAILED);
         }
 
-        if (biosType.second == Bios::SMKDan)
+        if (biosType.second == Bios::SMKDanBeta)
         {
-            if (!replacePattern(biosData, FRONT_SMKDAN_CHECKSUM_REPLACE))
-                LOG(LOG_ERROR, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
+            if (!replacePattern(biosData, FRONT_SMKDANBETA_CHECKSUM_REPLACE))
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
         }
     }
     else if (biosType.first == Bios::TopLoader)
     {
         if (!replacePattern(biosData, TOP_CD_RECOG_REPLACE))
-            LOG(LOG_ERROR, MSG_CD_RECOG_PATCH_FAILED);
+            Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_RECOG_PATCH_FAILED);
 
         if (speedHackEnabled)
         {
             if (!replacePattern(biosData, TOP_SPEEDHACK_REPLACE))
-                LOG(LOG_ERROR, MSG_CD_SPEEDHACK_PATCH_FAILED);
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SPEEDHACK_PATCH_FAILED);
         }
 
         if (biosType.second == Bios::SMKDan)
         {
             if (!replacePattern(biosData, TOP_SMKDAN_CHECKSUM_REPLACE))
-                LOG(LOG_ERROR, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
+        }
+
+        if (biosType.second == Bios::SMKDanBeta)
+        {
+            if (!replacePattern(biosData, TOP_SMKDANBETA_CHECKSUM_REPLACE))
+                Libretro::Log::message(RETRO_LOG_WARN, MSG_CD_SMKDAN_CRC_PATCH_FAILED);
         }
     }
 }
@@ -274,7 +312,11 @@ std::string Bios::description(Bios::Type type)
         break;
 
     case Bios::Mod::SMKDan:
-        result.append(", SMKDan");
+        result.append(", SMKDan 0.07");
+        break;
+
+    case Bios::Mod::SMKDanBeta:
+        result.append(", SMKDan 0.07b");
         break;
 
     case Bios::Mod::Universe32:

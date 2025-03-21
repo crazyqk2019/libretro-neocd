@@ -1,20 +1,18 @@
-#include "neogeocd.h"
-extern "C" {
-    #include "3rdparty/musashi/m68kcpu.h"
-}
-#include "m68kintf.h"
-#include "3rdparty/z80/z80.h"
-#include "z80intf.h"
-#include "3rdparty/ym/ym2610.h"
-#include "timeprofiler.h"
-#include "timer.h"
-
 #include <algorithm>
 
-NeoGeoCD neocd;
+#include "3rdparty/ym/ym2610.h"
+#include "3rdparty/z80/z80.h"
+#include "m68kintf.h"
+#include "neogeocd.h"
+#include "timeprofiler.h"
+#include "timer.h"
+#include "z80intf.h"
+#include "libretro_log.h"
 
-extern void cdromIRQTimerCallback(Timer* timer, uint32_t userData);
-extern void cdromIRQ1TimerCDZCallback(Timer* timer, uint32_t userData);
+extern "C"
+{
+    #include "3rdparty/musashi/m68kcpu.h"
+}
 
 NeoGeoCD::NeoGeoCD() :
     memory(),
@@ -25,17 +23,15 @@ NeoGeoCD::NeoGeoCD() :
     input(),
     audio(),
     cdzIrq1Divisor(0),
-    irqMasterEnable(false),
+    cdCommunicationNReset(false),
     irqMask1(0),
     irqMask2(0),
-    irq1EnabledThisFrame(false),
+    cdSectorDecodedThisFrame(false),
     fastForward(false),
     machineNationality(NationalityJapan),
     cdromVector(0),
     pendingInterrupts(0),
     remainingCyclesThisFrame(0),
-    m68kCyclesThisFrame(0),
-    z80CyclesThisFrame(0),
     z80TimeSlice(0),
     z80Disable(true),
     z80NMIDisable(true),
@@ -44,6 +40,14 @@ NeoGeoCD::NeoGeoCD() :
     audioResult(0),
     biosType(Bios::Unknown)
 {
+    // Create the worker thread to buffer & decode audio data
+    cdrom.createWorkerThread();
+}
+
+NeoGeoCD::~NeoGeoCD()
+{
+    // End the worker thread
+    cdrom.endWorkerThread();
 }
 
 void NeoGeoCD::initialize()
@@ -56,16 +60,14 @@ void NeoGeoCD::initialize()
     z80_init(0, Timer::Z80_CLOCK, NULL, z80_irq_callback);
 
     // Initialize the YM2610
-    YM2610Init(8000000, Audio::SAMPLE_RATE, neocd.memory.pcmRam, Memory::PCMRAM_SIZE, YM2610TimerHandler, YM2610IrqHandler);
+    YM2610Init(8000000, Audio::SAMPLE_RATE, memory.pcmRam, Memory::PCMRAM_SIZE, YM2610TimerHandler, YM2610IrqHandler);
 
-    // Create the worker thread to buffer & decode audio data
-    neocd.cdrom.createWorkerThread();
+    // Reset everything
+    reset();
 }
 
 void NeoGeoCD::deinitialize()
 {
-    // End the worker thread
-    neocd.cdrom.endWorkerThread();
 }
 
 void NeoGeoCD::reset()
@@ -79,14 +81,12 @@ void NeoGeoCD::reset()
     audio.reset();
 
     cdromVector = 0;
-    irqMasterEnable = false;
+    cdCommunicationNReset = false;
     cdzIrq1Divisor = 0;
     pendingInterrupts = 0;
     irqMask1 = 0;
     irqMask2 = 0;
     remainingCyclesThisFrame = 0;
-    m68kCyclesThisFrame = 0;
-    z80CyclesThisFrame = 0;
     z80TimeSlice = 0;
     z80Disable = true;
     z80NMIDisable = true;
@@ -112,13 +112,11 @@ void NeoGeoCD::runOneFrame()
 
     while (remainingCyclesThisFrame > 0)
     {
-        uint32_t timeSlice = std::min(neocd.timers.timeSlice(), remainingCyclesThisFrame);
+        uint32_t timeSlice = std::min(timers.timeSlice(), remainingCyclesThisFrame);
 
         PROFILE(p_m68k, ProfilingCategory::CpuM68K);
         uint32_t elapsed = Timer::m68kToMaster(m68k_execute(Timer::masterToM68k(timeSlice)));
         PROFILE_END(p_m68k);
-
-        m68kCyclesThisFrame += elapsed;
 
         z80TimeSlice += elapsed;
         if (z80TimeSlice > 0)
@@ -131,29 +129,23 @@ void NeoGeoCD::runOneFrame()
             {
                 PROFILE(p_z80, ProfilingCategory::CpuZ80);
                 z80Elapsed = Timer::z80ToMaster(z80_execute(Timer::masterToZ80(z80TimeSlice)));
+                PROFILE_END(p_z80);
             }
 
-            z80CyclesThisFrame += z80Elapsed;
             z80TimeSlice -= z80Elapsed;
         }
 
         remainingCyclesThisFrame -= elapsed;
-
-        audio.updateCurrentSample();
-
         currentTimeSeconds += Timer::masterToSeconds(elapsed);
 
         PROFILE(p_videoIRQ, ProfilingCategory::VideoAndIRQ);
-        neocd.timers.advanceTime(elapsed);
+        timers.advanceTime(elapsed);
         PROFILE_END(p_videoIRQ);
     }
 
     PROFILE(p_audioYM2610, ProfilingCategory::AudioYM2610);
     audio.finalize();
     PROFILE_END(p_audioYM2610);
-
-    m68kCyclesThisFrame -= Timer::CYCLES_PER_FRAME;
-    z80CyclesThisFrame -= Timer::CYCLES_PER_FRAME;
 }
 
 void NeoGeoCD::setInterrupt(NeoGeoCD::Interrupt interrupt)
@@ -166,6 +158,29 @@ void NeoGeoCD::clearInterrupt(NeoGeoCD::Interrupt interrupt)
     pendingInterrupts &= ~interrupt;
 }
 
+/**
+ * Interrupt levels have been determined by hooking each interrupt and writing SR somewhere in memory.
+ * VBL              -> SR=2100
+ * CD Communication -> SR=2200
+ * CD Decoder       -> SR=2200
+ * HBL              -> SR=2300
+ *
+ * The CD communication interrupt frequency changes:
+ * It happens at about 64Hz if the CD-ROM is idle, or exactly 75Hz if the CD-ROM is reading.
+ *
+ * Timings
+ * =======
+ *
+ * Measured by hooking the interrupt and incrementing a memory location.
+ * 10 minutes measured with a stopwatch (tried to be as accurate as possible)
+ *
+ * VBL
+ * 10 minutes = 35759 interrupts -> ~59.5983Hz
+ *
+ * CD Communication (Nothing playing)
+ * 10 minutes = 38788 interrupts -> ~64.6466Hz
+ *
+ */
 int NeoGeoCD::updateInterrupts(void)
 {
     int level = 0;
@@ -193,31 +208,39 @@ int NeoGeoCD::updateInterrupts(void)
     return level;
 }
 
-int NeoGeoCD::getScreenX() const
+int32_t NeoGeoCD::m68kMasterCyclesThisFrame() const
 {
-    return (Timer::masterToPixel(Timer::CYCLES_PER_FRAME - remainingCyclesThisFrame) % Timer::SCREEN_WIDTH);
+    return Timer::CYCLES_PER_FRAME - remainingCyclesThisFrame + Timer::m68kToMaster(m68k_cycles_run());
 }
 
-int NeoGeoCD::getScreenY() const
+int32_t NeoGeoCD::z80CyclesRun() const
 {
-    return (Timer::masterToPixel(Timer::CYCLES_PER_FRAME - remainingCyclesThisFrame) / Timer::SCREEN_WIDTH);
+   return z80TimeSlice - Timer::z80ToMaster(z80_ICount);
+}
+
+double NeoGeoCD::z80CurrentTimeSeconds() const
+{
+    return currentTimeSeconds + Timer::masterToSeconds(z80CyclesRun());
+}
+
+int32_t NeoGeoCD::z80CyclesThisFrame() const
+{
+    return Timer::CYCLES_PER_FRAME - remainingCyclesThisFrame + z80CyclesRun();
 }
 
 bool NeoGeoCD::saveState(DataPacker& out) const
 {
     // General machine state
     out << cdzIrq1Divisor;
-    out << irqMasterEnable;
+    out << cdCommunicationNReset;
     out << irqMask1;
     out << irqMask2;
-    out << irq1EnabledThisFrame;
+    out << cdSectorDecodedThisFrame;
     out << fastForward;
     out << machineNationality;
     out << cdromVector;
     out << pendingInterrupts;
     out << remainingCyclesThisFrame;
-    out << m68kCyclesThisFrame;
-    out << z80CyclesThisFrame;
     out << z80TimeSlice;
     out << z80Disable;
     out << z80NMIDisable;
@@ -233,25 +256,25 @@ bool NeoGeoCD::saveState(DataPacker& out) const
     out << Z80;
 
     // Timers
-    out << neocd.timers;
+    out << timers;
 
     // Memory
-    out << neocd.memory;
+    out << memory;
 
     // Video
-    out << neocd.video;
+    out << video;
 
     // Audio
-    out << neocd.audio;
+    out << audio;
 
     // YM2610
     YM2610SaveState(out);
 
     // LC8951
-    out << neocd.lc8951;
+    out << lc8951;
 
     // CDROM
-    out << neocd.cdrom;
+    out << cdrom;
 
     return !out.fail();
 }
@@ -260,17 +283,15 @@ bool NeoGeoCD::restoreState(DataPacker& in)
 {
     // General machine state
     in >> cdzIrq1Divisor;
-    in >> irqMasterEnable;
+    in >> cdCommunicationNReset;
     in >> irqMask1;
     in >> irqMask2;
-    in >> irq1EnabledThisFrame;
+    in >> cdSectorDecodedThisFrame;
     in >> fastForward;
     in >> machineNationality;
     in >> cdromVector;
     in >> pendingInterrupts;
     in >> remainingCyclesThisFrame;
-    in >> m68kCyclesThisFrame;
-    in >> z80CyclesThisFrame;
     in >> z80TimeSlice;
     in >> z80Disable;
     in >> z80NMIDisable;
@@ -295,25 +316,25 @@ bool NeoGeoCD::restoreState(DataPacker& in)
     Z80.irq_callback = z80_irq_callback;
 
     // Timers
-    in >> neocd.timers;
+    in >> timers;
 
     // Memory
-    in >> neocd.memory;
+    in >> memory;
 
     // Video
-    in >> neocd.video;
+    in >> video;
 
     // Audio
-    in >> neocd.audio;
+    in >> audio;
 
     // YM2610
     YM2610RestoreState(in);
 
     // LC8951
-    in >> neocd.lc8951;
+    in >> lc8951;
 
     // CDROM
-    in >> neocd.cdrom;
+    in >> cdrom;
 
     return (!in.fail());
 }

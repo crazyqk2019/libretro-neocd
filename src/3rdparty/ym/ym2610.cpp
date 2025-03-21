@@ -103,7 +103,6 @@
 
 --------------------------------------------------------------------------*/
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
@@ -111,6 +110,7 @@
 
 #include "ym2610.h"
 #include "../../neogeocd.h"
+#include "../../libretro_common.h"
 #include "../../datapacker.h"
 
 #define logerror(...)
@@ -1435,7 +1435,7 @@ INLINE void refresh_fc_eg_slot(FM_SLOT *SLOT ,int fc ,int kc)
 /* update phase increment counters */
 INLINE void refresh_fc_eg_chan(FM_CH *CH)
 {
-	if (CH->SLOT[SLOT1].Incr == -1)
+	if (CH->SLOT[SLOT1].Incr == UINT32(-1))
 	{
 		int fc = CH->fc;
 		int kc = CH->kcode;
@@ -2763,7 +2763,7 @@ void YM2610Update(int length)
 	if (OPN->ST.mode & 0xc0)
 	{
 		/* 3SLOT MODE */
-		if (cch[1]->SLOT[SLOT1].Incr == -1)
+		if (cch[1]->SLOT[SLOT1].Incr == UINT32(-1))
 		{
 			/* 3 slot mode */
 			refresh_fc_eg_slot(&cch[1]->SLOT[SLOT1], OPN->SL3.fc[1], OPN->SL3.kcode[1]);
@@ -2885,9 +2885,7 @@ void YM2610Update(int length)
 		Limit(lt, MAXOUT, MINOUT);
 		Limit(rt, MAXOUT, MINOUT);
 
-		neocd.audio.audioBuffer[neocd.audio.audioWritePointer * 2] = lt;
-		neocd.audio.audioBuffer[neocd.audio.audioWritePointer * 2 + 1] = rt;
-		neocd.audio.audioWritePointer++;
+		neocd->audio.buffer.appendSample({ static_cast<int16_t>(lt), static_cast<int16_t>(rt) });
 	}
 }
 
@@ -3376,7 +3374,7 @@ DataPacker& operator<<(DataPacker& out, const FM_CH& fmCh)
 	out.pushPointerMulti(reinterpret_cast<const char *>(fmCh.connect3), connect3Map, sizeof(connect3Map) / sizeof(DataPacker::ConstPointerMap));
 	out.pushPointer(reinterpret_cast<const char *>(fmCh.connect4), reinterpret_cast<const char *>(out_fm), sizeof(INT32) * 6);
 	out.pushPointerMulti(reinterpret_cast<const char *>(fmCh.mem_connect), memcMap, sizeof(memcMap) / sizeof(DataPacker::ConstPointerMap));
-	
+
 	out << fmCh.mem_value;
 	out << fmCh.pms;
 	out << fmCh.ams;
